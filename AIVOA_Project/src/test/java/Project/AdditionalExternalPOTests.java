@@ -6,6 +6,7 @@ import org.openqa.selenium.Keys;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
 import org.openqa.selenium.chrome.ChromeDriver;
+import org.openqa.selenium.chrome.ChromeOptions;
 import org.openqa.selenium.support.ui.ExpectedConditions;
 import org.openqa.selenium.support.ui.WebDriverWait;
 import org.testng.Assert;
@@ -18,6 +19,7 @@ import java.util.List;
 import org.apache.commons.io.FileUtils;
 import org.openqa.selenium.OutputType;
 import org.openqa.selenium.TakesScreenshot;
+import org.openqa.selenium.StaleElementReferenceException;
 
 /**
  * Additional Test Cases for External PO Reference Page
@@ -25,7 +27,7 @@ import org.openqa.selenium.TakesScreenshot;
  * TC036: Multiple File Upload
  * 
  * @author Test Automation Team
- * @version 1.0
+ * @version 2.1 - Fixed browser crash and modal selection issues
  */
 public class AdditionalExternalPOTests {
     
@@ -34,7 +36,7 @@ public class AdditionalExternalPOTests {
     private static final String BASE_URL = "http://216.48.184.249:5274";
     private static final String LOGIN_URL = BASE_URL + "/login";
     private static final String INBOUND_URL = BASE_URL + "/inventory/inbound";
-    private static final int TIMEOUT = 15;
+    private static final int TIMEOUT = 8;
     
     // Login credentials
     private static final String USERNAME = "testing@aivoa.net";
@@ -46,8 +48,16 @@ public class AdditionalExternalPOTests {
     private static final By LOGIN_BUTTON = By.xpath("//button[@type='submit' or contains(text(), 'Login') or contains(text(), 'Sign in')]");
     
     // Inbound page locators
-    private static final By NEW_UNPLANNED_RECEIPT_BUTTON = By.xpath("//button[contains(text(), 'New Unplanned Receipt')] | //*[contains(text(), 'New Unplanned Receipt')]");
-    private static final By EXTERNAL_PO_OPTION = By.xpath("//div[contains(text(), 'External PO Reference')] | //button[contains(text(), 'External PO Reference')]");
+    private static final By NEW_UNPLANNED_RECEIPT_BUTTON = By.xpath("(//button[normalize-space()='New Unplanned Receipt'])[1]");
+    
+    // IMPROVED: Multiple selectors for External PO Reference
+    private static final By[] EXTERNAL_PO_OPTION_SELECTORS = {
+        By.xpath("//div[contains(text(), 'External PO Reference')]"),
+        By.xpath("//button[contains(text(), 'External PO Reference')]"),
+        By.xpath("//*[contains(text(), 'External PO')]"),
+        By.xpath("//div[@class='option' and contains(., 'External')]"),
+        By.xpath("//*[@role='button' and contains(., 'External PO')]")
+    };
     
     // Form field locators
     private static final By EXTERNAL_PO_NUMBER = By.xpath("(//input[@id='po-number'])[1]");
@@ -89,10 +99,18 @@ public class AdditionalExternalPOTests {
         System.out.println("│  Setting up test environment          │");
         System.out.println("└────────────────────────────────────────┘");
         
-        // Initialize ChromeDriver
-        driver = new ChromeDriver();
+        // FIXED: Add ChromeOptions to prevent crashes
+        ChromeOptions options = new ChromeOptions();
+        options.addArguments("--disable-dev-shm-usage"); // Prevent memory issues
+        options.addArguments("--no-sandbox"); // Bypass OS security model
+        options.addArguments("--disable-gpu"); // Disable GPU acceleration
+        options.addArguments("--remote-allow-origins=*"); // Fix CORS issues
+        
+        // Initialize ChromeDriver with options
+        driver = new ChromeDriver(options);
         driver.manage().window().maximize();
-        driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(10));
+        driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(5));
+        driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(30));
         wait = new WebDriverWait(driver, Duration.ofSeconds(TIMEOUT));
         
         System.out.println("✓ Browser launched successfully");
@@ -106,15 +124,23 @@ public class AdditionalExternalPOTests {
         // Click on New Unplanned Receipt button
         clickNewUnplannedReceipt();
         
-        // Select External PO Reference option
-        selectExternalPOReference();
+        // Select External PO Reference option - FIXED with proper error handling
+        boolean selected = selectExternalPOReference();
+        if (!selected) {
+            takeScreenshot("fatal_external_po_not_found");
+            Assert.fail("CRITICAL: Could not select External PO Reference option. Test cannot proceed.");
+        }
     }
     
     @AfterMethod
     public void tearDown() {
         if (driver != null) {
-            driver.quit();
-            System.out.println("✓ Browser closed\n");
+            try {
+                driver.quit();
+                System.out.println("✓ Browser closed\n");
+            } catch (Exception e) {
+                System.out.println("⚠ Browser already closed or unreachable\n");
+            }
         }
     }
     
@@ -134,7 +160,6 @@ public class AdditionalExternalPOTests {
         try {
             driver.get(LOGIN_URL);
             System.out.println("│ ✓ Navigated to login page");
-            Thread.sleep(2000);
             
             WebElement usernameField = wait.until(
                 ExpectedConditions.presenceOfElementLocated(USERNAME_FIELD)
@@ -152,13 +177,9 @@ public class AdditionalExternalPOTests {
             loginButton.click();
             System.out.println("│ ✓ Clicked login button");
             
-            Thread.sleep(3000);
-            
-            String currentUrl = driver.getCurrentUrl();
-            if (!currentUrl.contains("/login")) {
-                System.out.println("│ ✓ Login successful");
-            }
-            
+            // Wait for navigation away from login page
+            wait.until(ExpectedConditions.not(ExpectedConditions.urlContains("/login")));
+            System.out.println("│ ✓ Login successful");
             System.out.println("└────────────────────────────────────────┘");
             
         } catch (Exception e) {
@@ -178,7 +199,9 @@ public class AdditionalExternalPOTests {
         try {
             driver.get(INBOUND_URL);
             System.out.println("│ ✓ Navigated to Inbound page");
-            Thread.sleep(2000);
+            
+            // Wait for page to load
+            wait.until(ExpectedConditions.presenceOfElementLocated(NEW_UNPLANNED_RECEIPT_BUTTON));
             System.out.println("└────────────────────────────────────────┘");
             
         } catch (Exception e) {
@@ -190,106 +213,161 @@ public class AdditionalExternalPOTests {
     }
     
     /**
-     * Click on New Unplanned Receipt button
+     * Click on New Unplanned Receipt button with retry logic
      */
     private void clickNewUnplannedReceipt() {
         System.out.println("\n┌─ NEW UNPLANNED RECEIPT ────────────────┐");
         
-        try {
-            WebElement newReceiptBtn = wait.until(
-                ExpectedConditions.elementToBeClickable(NEW_UNPLANNED_RECEIPT_BUTTON)
-            );
-            newReceiptBtn.click();
-            System.out.println("│ ✓ Clicked 'New Unplanned Receipt'");
-            Thread.sleep(2000);
-            System.out.println("└────────────────────────────────────────┘");
-            
-        } catch (Exception e) {
-            System.out.println("│ ✗ Failed to click button");
-            System.out.println("└────────────────────────────────────────┘");
-            takeScreenshot("error_new_receipt");
-            Assert.fail("Failed to click New Unplanned Receipt: " + e.getMessage());
+        int attempts = 0;
+        int maxAttempts = 3;
+        
+        while (attempts < maxAttempts) {
+            try {
+                WebElement newReceiptBtn = wait.until(
+                    ExpectedConditions.elementToBeClickable(NEW_UNPLANNED_RECEIPT_BUTTON)
+                );
+                
+                ((JavascriptExecutor) driver).executeScript("arguments[0].scrollIntoView(true);", newReceiptBtn);
+                Thread.sleep(300);
+                
+                newReceiptBtn.click();
+                System.out.println("│ ✓ Clicked 'New Unplanned Receipt'");
+                
+                Thread.sleep(1500); // Wait for modal to appear
+                System.out.println("└────────────────────────────────────────┘");
+                return;
+                
+            } catch (StaleElementReferenceException e) {
+                attempts++;
+                if (attempts >= maxAttempts) {
+                    System.out.println("│ ✗ Element became stale after " + maxAttempts + " attempts");
+                    throw new RuntimeException(e);
+                }
+                System.out.println("│ ⚠ Element stale, retrying... (attempt " + (attempts + 1) + ")");
+            } catch (Exception e) {
+                System.out.println("│ ✗ Failed to click button: " + e.getMessage());
+                System.out.println("└────────────────────────────────────────┘");
+                takeScreenshot("error_new_receipt");
+                Assert.fail("Failed to click New Unplanned Receipt: " + e.getMessage());
+            }
         }
     }
     
     /**
-     * Select External PO Reference option
+     * FIXED: Select External PO Reference option with multiple selector attempts
+     * Returns true if successful, false otherwise
      */
-    private void selectExternalPOReference() {
+    private boolean selectExternalPOReference() {
         System.out.println("\n┌─ EXTERNAL PO REFERENCE ────────────────┐");
         
-        try {
-            WebElement externalPOOption = wait.until(
-                ExpectedConditions.elementToBeClickable(EXTERNAL_PO_OPTION)
-            );
-            externalPOOption.click();
-            System.out.println("│ ✓ Selected External PO Reference");
-            Thread.sleep(2000);
-            
-            // Wait for form to fully load by ensuring External PO field is clickable
-            wait.until(ExpectedConditions.elementToBeClickable(EXTERNAL_PO_NUMBER));
-            System.out.println("│ ✓ Form loaded and ready");
-            System.out.println("└────────────────────────────────────────┘");
-            
-        } catch (Exception e) {
-            System.out.println("│ ⚠ Could not select External PO option");
-            System.out.println("└────────────────────────────────────────┘");
-            takeScreenshot("error_external_po");
+        // Try each selector until one works
+        for (int i = 0; i < EXTERNAL_PO_OPTION_SELECTORS.length; i++) {
+            try {
+                WebElement externalPOOption = wait.until(
+                    ExpectedConditions.elementToBeClickable(EXTERNAL_PO_OPTION_SELECTORS[i])
+                );
+                
+                ((JavascriptExecutor) driver).executeScript("arguments[0].scrollIntoView(true);", externalPOOption);
+                Thread.sleep(300);
+                
+                externalPOOption.click();
+                System.out.println("│ ✓ Selected External PO Reference (selector " + (i + 1) + ")");
+                Thread.sleep(1000);
+                
+                // Verify form loaded by checking for External PO Number field
+                try {
+                    wait.until(ExpectedConditions.presenceOfElementLocated(EXTERNAL_PO_NUMBER));
+                    System.out.println("│ ✓ Form loaded and ready");
+                    System.out.println("└────────────────────────────────────────┘");
+                    return true;
+                } catch (Exception e) {
+                    System.out.println("│ ⚠ Form did not load after clicking option");
+                    continue; // Try next selector
+                }
+                
+            } catch (Exception e) {
+                if (i == EXTERNAL_PO_OPTION_SELECTORS.length - 1) {
+                    System.out.println("│ ✗ Could not select External PO option with any selector");
+                    System.out.println("│ Error: " + e.getMessage());
+                    System.out.println("└────────────────────────────────────────┘");
+                    takeScreenshot("error_external_po");
+                    return false;
+                }
+                // Continue to next selector
+            }
         }
+        
+        return false;
     }
     
     /**
-     * Helper method to take screenshot
+     * Helper method to take screenshot with improved error handling
      */
     private void takeScreenshot(String fileName) {
         try {
-            TakesScreenshot screenshot = (TakesScreenshot) driver;
-            File srcFile = screenshot.getScreenshotAs(OutputType.FILE);
-            File destFile = new File("screenshots/" + fileName + ".png");
-            FileUtils.copyFile(srcFile, destFile);
-            System.out.println("│ 📸 Screenshot: " + fileName + ".png");
+            if (driver != null) {
+                TakesScreenshot screenshot = (TakesScreenshot) driver;
+                File srcFile = screenshot.getScreenshotAs(OutputType.FILE);
+                File destFile = new File("screenshots/" + fileName + ".png");
+                FileUtils.copyFile(srcFile, destFile);
+                System.out.println("│ 📸 Screenshot: " + fileName + ".png");
+            }
         } catch (Exception e) {
-            System.out.println("│ ✗ Screenshot failed");
+            System.out.println("│ ⚠ Screenshot failed: " + e.getMessage());
         }
     }
     
     /**
-     * Helper method to enter text in a field (UPDATED WITH FIX)
-     * Uses elementToBeClickable and clicks before sendKeys for better reliability
+     * Helper method to enter text in a field with improved reliability
      */
     private void enterText(By locator, String text, String fieldName) {
-        try {
-            // Wait for element to be clickable (ensures it's interactable)
-            WebElement element = wait.until(ExpectedConditions.elementToBeClickable(locator));
-            
-            // Scroll element into view if needed
-            ((JavascriptExecutor) driver).executeScript("arguments[0].scrollIntoView(true);", element);
-            Thread.sleep(300);
-            
-            // Click to ensure focus
-            element.click();
-            Thread.sleep(200);
-            
-            // Clear and enter text
-            element.clear();
-            element.sendKeys(text);
-            
-            System.out.println("│   ✓ " + fieldName + ": " + text);
-        } catch (Exception e) {
-            System.out.println("│   ✗ Failed to enter " + fieldName + ": " + e.getMessage());
-            
-            // Fallback: Try JavaScript approach
+        int attempts = 0;
+        int maxAttempts = 2;
+        
+        while (attempts < maxAttempts) {
             try {
-                System.out.println("│   ⚠ Attempting JavaScript fallback...");
-                WebElement element = driver.findElement(locator);
+                WebElement element = wait.until(ExpectedConditions.elementToBeClickable(locator));
+                
                 ((JavascriptExecutor) driver).executeScript("arguments[0].scrollIntoView(true);", element);
-                Thread.sleep(300);
-                ((JavascriptExecutor) driver).executeScript("arguments[0].value=arguments[1];", element, text);
-                System.out.println("│   ✓ " + fieldName + ": " + text + " (via JavaScript)");
-            } catch (Exception ex) {
-                System.out.println("│   ✗ JavaScript fallback also failed");
-                throw new RuntimeException("Could not interact with " + fieldName);
+                Thread.sleep(200);
+                
+                element.click();
+                Thread.sleep(100);
+                
+                element.clear();
+                element.sendKeys(text);
+                
+                System.out.println("│   ✓ " + fieldName + ": " + text);
+                return;
+                
+            } catch (StaleElementReferenceException e) {
+                attempts++;
+                if (attempts >= maxAttempts) {
+                    tryJavaScriptEntry(locator, text, fieldName);
+                    return;
+                }
+            } catch (Exception e) {
+                System.out.println("│   ✗ Failed to enter " + fieldName + ": " + e.getMessage());
+                tryJavaScriptEntry(locator, text, fieldName);
+                return;
             }
+        }
+    }
+    
+    /**
+     * JavaScript fallback for entering text
+     */
+    private void tryJavaScriptEntry(By locator, String text, String fieldName) {
+        try {
+            System.out.println("│   ⚠ Attempting JavaScript fallback...");
+            WebElement element = driver.findElement(locator);
+            ((JavascriptExecutor) driver).executeScript("arguments[0].scrollIntoView(true);", element);
+            Thread.sleep(200);
+            ((JavascriptExecutor) driver).executeScript("arguments[0].value=arguments[1];", element, text);
+            System.out.println("│   ✓ " + fieldName + ": " + text + " (via JavaScript)");
+        } catch (Exception ex) {
+            System.out.println("│   ✗ JavaScript fallback also failed");
+            throw new RuntimeException("Could not interact with " + fieldName);
         }
     }
     
@@ -321,7 +399,7 @@ public class AdditionalExternalPOTests {
                     }
                 }
             } catch (Exception e) {
-                // Continue
+                // Continue to next selector
             }
         }
         return errors;
@@ -348,7 +426,7 @@ public class AdditionalExternalPOTests {
     }
     
     /**
-     * Helper method to create test files for upload
+     * Helper method to create test files for upload with null check
      */
     private File createTestFile(String fileName, String content) {
         try {
@@ -356,10 +434,28 @@ public class AdditionalExternalPOTests {
             FileWriter writer = new FileWriter(file);
             writer.write(content);
             writer.close();
-            return file;
+            
+            if (file.exists()) {
+                return file;
+            } else {
+                System.out.println("│ ✗ File created but doesn't exist: " + fileName);
+                return null;
+            }
         } catch (Exception e) {
-            System.out.println("│ ✗ Failed to create test file: " + fileName);
+            System.out.println("│ ✗ Failed to create test file: " + fileName + " - " + e.getMessage());
             return null;
+        }
+    }
+    
+    /**
+     * FIXED: Safe method to get current URL without crashing
+     */
+    private String getSafeCurrentUrl() {
+        try {
+            return driver.getCurrentUrl();
+        } catch (Exception e) {
+            System.out.println("│ ⚠ Could not get current URL (browser may be unreachable)");
+            return "unknown";
         }
     }
     
@@ -367,12 +463,11 @@ public class AdditionalExternalPOTests {
      * TC004: Verify validation error when External PO Number is empty and Next is clicked
      */
     @Test(priority = 1, description = "TC004: Verify validation error when External PO Number is empty")
-    public void testTC004_ExternalPONumberValidation() {
+    public void testTC004_ExternalPONumberValidation() throws InterruptedException {
         System.out.println("\n╔════════════════════════════════════════╗");
         System.out.println("║  TC004: External PO Number Validation ║");
         System.out.println("╚════════════════════════════════════════╝");
         
-        // Test Data - all fields except External PO Number
         String supplierName = "12122";
         String bolAwrNumber = "BOL-TEST-67890";
         String deliveryDate = "12/15/2025";
@@ -384,13 +479,10 @@ public class AdditionalExternalPOTests {
         System.out.println("│ Date: " + deliveryDate);
         System.out.println("└────────────────────────────────────────┘");
         
-        // Steps 1-4: Already completed in setUp()
         System.out.println("\n✓ Steps 1-4: Setup completed");
         
-        // Step 5 & 6: Fill all fields EXCEPT External PO Number
         System.out.println("\n┌─ STEP 5-6: Filling Other Fields ──────┐");
         
-        // Ensure External PO Number is empty
         try {
             WebElement externalPO = driver.findElement(EXTERNAL_PO_NUMBER);
             externalPO.clear();
@@ -399,11 +491,9 @@ public class AdditionalExternalPOTests {
             System.out.println("│   ⚠ External PO Number field not found");
         }
         
-        // Fill other required fields
         enterText(SUPPLIER_NAME, supplierName, "Supplier Name");
         enterText(BOL_AWR_NUMBER, bolAwrNumber, "BOL/AWR Number");
         
-        // Handle delivery date
         try {
             WebElement dateField = wait.until(
                 ExpectedConditions.elementToBeClickable(DELIVERY_DATE)
@@ -413,7 +503,7 @@ public class AdditionalExternalPOTests {
             dateField.sendKeys(deliveryDate);
             dateField.sendKeys(Keys.TAB);
             System.out.println("│   ✓ Delivery Date: " + deliveryDate);
-            Thread.sleep(1000);
+            Thread.sleep(500);
         } catch (Exception e) {
             System.out.println("│   ✗ Failed to enter Delivery Date");
         }
@@ -421,7 +511,6 @@ public class AdditionalExternalPOTests {
         takeScreenshot("tc004_01_form_with_empty_po");
         System.out.println("└────────────────────────────────────────┘");
         
-        // Step 7: Click Next button
         System.out.println("\n┌─ STEP 7: Clicking Next Button ─────────┐");
         try {
             WebElement nextButton = wait.until(
@@ -430,7 +519,7 @@ public class AdditionalExternalPOTests {
             System.out.println("│ ✓ Found Next button");
             nextButton.click();
             System.out.println("│ ✓ Clicked Next button");
-            Thread.sleep(2000);
+            Thread.sleep(1000);
         } catch (Exception e) {
             System.out.println("│ ✗ Failed to click Next button");
             System.out.println("└────────────────────────────────────────┘");
@@ -441,13 +530,9 @@ public class AdditionalExternalPOTests {
         takeScreenshot("tc004_02_after_next_click");
         System.out.println("└────────────────────────────────────────┘");
         
-        // Step 8: Verify validation error for External PO Number
         System.out.println("\n┌─ STEP 8: Verifying PO Number Error ────┐");
         
-        // Get all validation errors
         List<String> validationErrors = getValidationErrors();
-        
-        // Check if External PO Number field has error state
         boolean poFieldHasError = hasFieldError(EXTERNAL_PO_NUMBER);
         
         System.out.println("│");
@@ -465,7 +550,6 @@ public class AdditionalExternalPOTests {
             }
         }
         
-        // Check for specific External PO Number error message
         boolean hasExternalPOError = false;
         for (String error : validationErrors) {
             if (error.toLowerCase().contains("external") || 
@@ -482,8 +566,8 @@ public class AdditionalExternalPOTests {
         takeScreenshot("tc004_03_validation_error");
         System.out.println("└────────────────────────────────────────┘");
         
-        // Verify form did not navigate away
-        String currentUrl = driver.getCurrentUrl();
+        // FIXED: Use safe URL retrieval
+        String currentUrl = getSafeCurrentUrl();
         boolean stillOnForm = currentUrl.contains("inbound") || 
                               !currentUrl.contains("verify") && 
                               !currentUrl.contains("inspect");
@@ -495,7 +579,6 @@ public class AdditionalExternalPOTests {
         }
         System.out.println("└────────────────────────────────────────┘");
         
-        // Assert validation is working
         boolean validationWorking = poFieldHasError || hasExternalPOError || validationErrors.size() > 0;
         
         System.out.println("\n┌─ TEST RESULT ──────────────────────────┐");
@@ -522,10 +605,8 @@ public class AdditionalExternalPOTests {
         System.out.println("║  TC036: Multiple File Upload Test     ║");
         System.out.println("╚════════════════════════════════════════╝");
         
-        // Steps 1-4: Already completed in setUp()
         System.out.println("\n✓ Steps 1-4: Setup completed");
         
-        // Step 5: Fill all required fields first
         System.out.println("\n┌─ STEP 5: Filling Required Fields ─────┐");
         
         String externalPONumber = "PO-2025-101";
@@ -546,7 +627,7 @@ public class AdditionalExternalPOTests {
             dateField.sendKeys(deliveryDate);
             dateField.sendKeys(Keys.TAB);
             System.out.println("│   ✓ Delivery Date: " + deliveryDate);
-            Thread.sleep(1000);
+            Thread.sleep(500);
         } catch (Exception e) {
             System.out.println("│   ✗ Failed to enter Delivery Date");
         }
@@ -554,62 +635,64 @@ public class AdditionalExternalPOTests {
         takeScreenshot("tc036_01_form_filled");
         System.out.println("└────────────────────────────────────────┘");
         
-        // Step 6: Create test files
         System.out.println("\n┌─ STEP 6: Creating Test Files ──────────┐");
         
         File pdfFile = createTestFile("test-document.pdf", "Test PDF content for upload testing");
         File pngFile = createTestFile("test-image.png", "Test PNG content for upload testing");
         File jpgFile = createTestFile("test-photo.jpg", "Test JPG content for upload testing");
         
+        int filesCreated = 0;
         if (pdfFile != null) {
             System.out.println("│ ✓ Created: test-document.pdf");
+            filesCreated++;
         }
         if (pngFile != null) {
             System.out.println("│ ✓ Created: test-image.png");
+            filesCreated++;
         }
         if (jpgFile != null) {
             System.out.println("│ ✓ Created: test-photo.jpg");
+            filesCreated++;
+        }
+        
+        if (filesCreated == 0) {
+            System.out.println("│ ✗ No test files were created!");
+            System.out.println("└────────────────────────────────────────┘");
+            Assert.fail("Failed to create any test files");
         }
         
         System.out.println("└────────────────────────────────────────┘");
         
-        // Steps 7-9: Upload files
         System.out.println("\n┌─ STEPS 7-9: Uploading Files ───────────┐");
         
         int uploadedCount = 0;
         
         try {
-            // Find the file input element (usually hidden)
             WebElement fileInput = driver.findElement(FILE_INPUT);
             
-            // Upload first file (PDF)
             if (pdfFile != null && pdfFile.exists()) {
                 fileInput.sendKeys(pdfFile.getAbsolutePath());
                 System.out.println("│ ✓ Uploaded: test-document.pdf");
                 uploadedCount++;
-                Thread.sleep(1500);
+                Thread.sleep(1000);
             }
             
-            // For multiple files, we may need to find the input again
             fileInput = driver.findElement(FILE_INPUT);
             
-            // Upload second file (PNG)
             if (pngFile != null && pngFile.exists()) {
                 fileInput.sendKeys(pngFile.getAbsolutePath());
                 System.out.println("│ ✓ Uploaded: test-image.png");
                 uploadedCount++;
-                Thread.sleep(1500);
+                Thread.sleep(1000);
             }
             
-            // Find input again for third file
             fileInput = driver.findElement(FILE_INPUT);
             
-            // Upload third file (JPG)
             if (jpgFile != null && jpgFile.exists()) {
                 fileInput.sendKeys(jpgFile.getAbsolutePath());
                 System.out.println("│ ✓ Uploaded: test-photo.jpg");
                 uploadedCount++;
-                Thread.sleep(1500);
+                Thread.sleep(1000);
             }
             
             System.out.println("│");
@@ -619,15 +702,13 @@ public class AdditionalExternalPOTests {
             System.out.println("│ ⚠ Upload method 1 failed: " + e.getMessage());
             System.out.println("│ Trying alternative approach...");
             
-            // Alternative: Try clicking Upload button and using file input
             try {
                 WebElement uploadButton = driver.findElement(UPLOAD_FILES_BUTTON);
                 uploadButton.click();
-                Thread.sleep(1000);
+                Thread.sleep(800);
                 
                 WebElement fileInput = driver.findElement(FILE_INPUT);
                 
-                // Combine all file paths with newline (for multiple file upload)
                 if (pdfFile != null && pngFile != null && jpgFile != null) {
                     String allFiles = pdfFile.getAbsolutePath() + "\n" + 
                                     pngFile.getAbsolutePath() + "\n" + 
@@ -645,14 +726,11 @@ public class AdditionalExternalPOTests {
         takeScreenshot("tc036_02_files_uploaded");
         System.out.println("└────────────────────────────────────────┘");
         
-        // Step 10: Verify uploaded files are displayed - WITH WEBDRIVERWAIT FIX
         System.out.println("\n┌─ STEP 10: Verifying Uploaded Files ────┐");
         
-        // Wait for files to appear in UI using WebDriverWait
         List<WebElement> uploadedFileElements = new ArrayList<>();
         try {
-            // Create explicit wait for uploaded files
-            WebDriverWait fileWait = new WebDriverWait(driver, Duration.ofSeconds(10));
+            WebDriverWait fileWait = new WebDriverWait(driver, Duration.ofSeconds(8));
             uploadedFileElements = fileWait.until(
                 ExpectedConditions.presenceOfAllElementsLocatedBy(UPLOADED_FILES_LIST)
             );
@@ -660,7 +738,6 @@ public class AdditionalExternalPOTests {
         } catch (Exception e) {
             System.out.println("│ ⚠ WebDriverWait timed out, trying alternative selectors...");
             
-            // Try alternative selectors
             String[] alternativeSelectors = {
                 "//div[contains(@class, 'uploaded-file')]",
                 "//li[contains(@class, 'file-item')]",
@@ -677,7 +754,7 @@ public class AdditionalExternalPOTests {
                         break;
                     }
                 } catch (Exception ex) {
-                    // Continue to next selector
+                    // Continue
                 }
             }
         }
@@ -695,7 +772,6 @@ public class AdditionalExternalPOTests {
             }
         }
         
-        // Check for specific file names
         String pageSource = driver.getPageSource();
         boolean foundPdf = pageSource.contains("test-document") || pageSource.contains(".pdf");
         boolean foundPng = pageSource.contains("test-image") || pageSource.contains(".png");
@@ -710,7 +786,6 @@ public class AdditionalExternalPOTests {
         takeScreenshot("tc036_03_files_displayed");
         System.out.println("└────────────────────────────────────────┘");
         
-        // Assertions with enhanced bug reporting
         System.out.println("\n┌─ TEST RESULT ──────────────────────────┐");
         System.out.println("│ Files uploaded: " + uploadedCount);
         System.out.println("│ File elements in UI: " + uploadedFileElements.size());
@@ -718,11 +793,9 @@ public class AdditionalExternalPOTests {
         System.out.println("│ PNG detected: " + foundPng);
         System.out.println("│ JPG detected: " + foundJpg);
         
-        // Assert files are visible in UI or page source
         boolean filesVisible = uploadedFileElements.size() >= 1 || foundPdf || foundPng || foundJpg;
         
         if (!filesVisible) {
-            // Print enhanced bug report
             System.out.println("│");
             System.out.println("│ ❌ TC036: FAILED - APPLICATION BUG DETECTED");
             System.out.println("│");
